@@ -3,6 +3,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { badge } from "../badge.mjs";
 import { AI_TRAILER, isPolicyText, isBan, attributeRules, mirrorReason, countBursts, verdictOf } from "../human-controlled.mjs";
 
 test("an AI trailer names an AI tool, a human co-author does not count", () => {
@@ -83,4 +84,14 @@ test("the verdict and its caps", () => {
   // hiding the footers does not escape the cap
   assert.deepEqual(verdictOf({ policy: null, aiSeen: 0, bursts: 2 })[1], 0.4);
   assert.deepEqual(verdictOf({ policy: null, aiSeen: 2, bursts: 1 }), ["no AI visible, and no policy", null]);
+});
+
+test("the badge: a score, the safeguards of a ban, or grey with no score", () => {
+  assert.deepEqual(badge({ total: 0.63 }), { schemaVersion: 1, label: "human-controlled", message: "63%", color: "yellow" });
+  assert.equal(badge({ total: 0.84, aiBan: "https://example.org/ai" }).label, "safeguards");
+  assert.equal(badge({ total: 0.84 }).color, "green");
+  assert.equal(badge({ total: 0.4 }).color, "orange");
+  assert.equal(badge({ total: null, tooLittle: "2 commits" }).message, "no score yet");
+  assert.equal(badge({ total: null, mirror: "description" }).message, "mirror, no score");
+  assert.equal(badge(null).message, "unavailable");
 });
