@@ -116,6 +116,11 @@ scored like any other repository.
 
 GitHub only, run by hand. A CI check and a README badge are next.
 
+## How it is made
+
+This tool is written by an AI (an LLM) and directed by a human; how that
+works is in [AI_POLICY.md](AI_POLICY.md).
+
 ## License
 
 MIT
