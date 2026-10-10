@@ -1,0 +1,59 @@
+name: human-controlled
+description: Is this AI-built project under human control? Scores a repository and writes a shields.io badge file.
+branding:
+  icon: user-check
+  color: green
+
+inputs:
+  repository:
+    description: The repository to score, as owner/repo
+    default: ${{ github.repository }}
+  days:
+    description: How many days of history to look at
+    default: "90"
+  badge:
+    description: Where to write the shields.io endpoint badge file
+    default: badge.json
+  token:
+    description: A token that can read the repository's pull requests and checks
+    default: ${{ github.token }}
+
+outputs:
+  score:
+    description: The score as a whole percentage, empty when there is none
+    value: ${{ steps.score.outputs.score }}
+  verdict:
+    description: The verdict line
+    value: ${{ steps.score.outputs.verdict }}
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-node@v4
+      with:
+        node-version: 22
+    - id: score
+      shell: bash
+      env:
+        GITHUB_TOKEN: ${{ inputs.token }}
+        REPOSITORY: ${{ inputs.repository }}
+        DAYS: ${{ inputs.days }}
+        BADGE: ${{ inputs.badge }}
+      run: |
+        result="$RUNNER_TEMP/human-controlled.json"
+        out="$RUNNER_TEMP/human-controlled.txt"
+        set +e
+        node "$GITHUB_ACTION_PATH/human-controlled.mjs" "$REPOSITORY" --days "$DAYS" --json-file "$result" > "$out"
+        status=$?
+        set -e
+        cat "$out"
+        { echo '```'; cat "$out"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+        # 0 is a score, 3 is "no score" (a mirror, or too little history); anything else failed
+        [ "$status" = 0 ] || [ "$status" = 3 ] || exit "$status"
+        node "$GITHUB_ACTION_PATH/badge.mjs" < "$result" > "$BADGE"
+        node -e '
+          const r = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"));
+          const score = r.total == null ? "" : Math.round(r.total * 100);
+          const verdict = r.verdict ?? r.mirror ?? r.tooLittle ?? "";
+          require("fs").appendFileSync(process.env.GITHUB_OUTPUT, `score=${score}\nverdict=${verdict.replace(/\n/g, " ")}\n`);
+        ' "$result"

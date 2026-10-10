@@ -1,0 +1,40 @@
+name: Badge
+
+# This repository's own score, with its own action: after every merge and
+# once a week, written to the badge branch for the README's shields.io badge.
+# The badge branch keeps one commit; main is never written to.
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "17 5 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: read
+  checks: read
+
+concurrency:
+  group: badge
+
+jobs:
+  badge:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - id: hc
+        uses: ./
+        with:
+          badge: ${{ runner.temp }}/badge.json
+      - name: Publish the badge
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERDICT: ${{ steps.hc.outputs.verdict }}
+        run: |
+          mkdir "$RUNNER_TEMP/site" && mv "$RUNNER_TEMP/badge.json" "$RUNNER_TEMP/site/" && cd "$RUNNER_TEMP/site"
+          git init -q -b badge
+          git add badge.json
+          git -c user.name="github-actions[bot]" -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+            commit -q -m "Badge for ${GITHUB_SHA::7}" -m "$VERDICT"
+          git push -qf "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" badge

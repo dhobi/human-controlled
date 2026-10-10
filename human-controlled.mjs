@@ -2,7 +2,7 @@
 // human-controlled: is this AI-built project under human control? An indication
 // from evidence only, not proof: everything here can be faked.
 //
-//   node human-controlled.mjs https://github.com/owner/repo [--days 90] [--json]
+//   node human-controlled.mjs https://github.com/owner/repo [--days 90] [--json] [--json-file <path>]
 //
 // Every number comes from the GitHub API (with the `gh` login, or $GITHUB_TOKEN
 // in CI): merged PRs, their reviews, files, commits and checks, the default
@@ -13,16 +13,19 @@
 
 import { execFileSync } from "node:child_process";
 import { pathToFileURL } from "node:url";
+import { writeFileSync } from "node:fs";
 
 // Run as a command, or imported by the tests for its rules
 const CLI = import.meta.url === pathToFileURL(process.argv[1] ?? "").href;
 const args = CLI ? process.argv.slice(2) : [];
-const url = args.find((a) => !a.startsWith("--"));
+const url = args.find((a, i) => !a.startsWith("--") && !["--days", "--json-file"].includes(args[i - 1]));
 const DAYS = Number(args[args.indexOf("--days") + 1]) || 90;
 const JSON_OUT = args.includes("--json");
+// --json-file <path>: the JSON result to a file, beside the readable output
+const JSON_FILE = args.includes("--json-file") ? args[args.indexOf("--json-file") + 1] : null;
 const m = url?.match(/github\.com[/:]([^/]+)\/([^/.#?]+)/) ?? url?.match(/^([^/]+)\/([^/]+)$/);
 if (CLI && !m) {
-  console.error("usage: human-controlled <github repo url | owner/repo> [--days 90] [--json]");
+  console.error("usage: human-controlled <github repo url | owner/repo> [--days 90] [--json] [--json-file <path>]");
   process.exit(2);
 }
 let [owner, repo] = m ? [m[1], m[2]] : [];
@@ -446,18 +449,20 @@ if (CLI) await main();
 
 async function main() {
   const r = await score();
+  const asJSON = { ...r, total: r.tooLittle || r.mirror ? null : r.total, checks: r.checks?.map(([pillar, name, weight, s, evidence]) => ({ pillar, name, weight, score: s, evidence })) };
+  if (JSON_FILE) writeFileSync(JSON_FILE, JSON.stringify(asJSON, null, 2));
   if (r.tooLittle) {
-    if (JSON_OUT) console.log(JSON.stringify({ ...r, total: null }, null, 2));
+    if (JSON_OUT) console.log(JSON.stringify(asJSON, null, 2));
     else console.log(`\n${r.repo}: too little history to judge (${r.tooLittle}). No score.\n`);
     process.exit(3);
   }
   if (r.mirror) {
-    if (JSON_OUT) console.log(JSON.stringify({ ...r, total: null }, null, 2));
+    if (JSON_OUT) console.log(JSON.stringify(asJSON, null, 2));
     else console.log(`\n${r.repo} looks like a mirror: ${r.mirror}.\nIts review process lives elsewhere, so this tool cannot judge it. No score.\n`);
     process.exit(3);
   }
   if (JSON_OUT) {
-    console.log(JSON.stringify({ ...r, checks: r.checks.map(([pillar, name, weight, s, evidence]) => ({ pillar, name, weight, score: s, evidence })) }, null, 2));
+    console.log(JSON.stringify(asJSON, null, 2));
   } else {
     const label = r.aiBan ? "safeguards" : "human-controlled";
     console.log(`\n${r.repo}: ${Math.round(r.total * 100)}% ${label} (an indication, not proof)`);

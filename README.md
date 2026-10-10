@@ -1,5 +1,7 @@
 # human-controlled
 
+[![human-controlled](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/dhobi/human-controlled/badge/badge.json)](https://github.com/dhobi/human-controlled)
+
 **Is this AI-built project under human control?**
 
 Give it a repository, get a percentage and the evidence behind it. Every
@@ -21,6 +23,52 @@ node human-controlled.mjs owner/repo --days 30 --json
 
 A run takes 10–25 seconds. It looks at the last 90 days (at most 300 merged
 PRs and 500 commits).
+
+## In your repository: a badge
+
+The repository's action scores a repository and writes a
+[shields.io endpoint](https://shields.io/badges/endpoint-badge) file. This
+workflow publishes it to a `badge` branch after every merge and once a week,
+without touching `main`:
+
+```yaml
+name: Badge
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "17 5 * * 1"
+permissions:
+  contents: write
+  pull-requests: read
+  checks: read
+jobs:
+  badge:
+    runs-on: ubuntu-latest
+    steps:
+      - id: hc
+        uses: dhobi/human-controlled@main
+        with:
+          badge: ${{ runner.temp }}/badge.json
+      - env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir "$RUNNER_TEMP/site" && mv "$RUNNER_TEMP/badge.json" "$RUNNER_TEMP/site/" && cd "$RUNNER_TEMP/site"
+          git init -q -b badge && git add badge.json
+          git -c user.name="github-actions[bot]" -c user.email="41898282+github-actions[bot]@users.noreply.github.com" commit -q -m "Badge"
+          git push -qf "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" badge
+```
+
+Then, in the README, with your own owner and repository:
+
+```markdown
+[![human-controlled](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/OWNER/REPO/badge/badge.json)](https://github.com/dhobi/human-controlled)
+```
+
+The badge shows the score (green from 75%, yellow from 50%, orange below),
+"safeguards" for a repository that bans AI, and grey "no score yet" or
+"mirror, no score" where there is nothing to judge. The run's summary page has
+the full table.
 
 ## What it checks
 
@@ -114,7 +162,7 @@ scored like any other repository.
 
 ## Status
 
-GitHub only, run by hand. A CI check and a README badge are next.
+GitHub only. Run by hand, or in a workflow with the action above.
 
 ## How it is made
 
