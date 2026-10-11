@@ -88,6 +88,31 @@ const AI_TOOLS = "claude|anthropic|copilot|openai|chatgpt|gpt-?[0-9]|codex|curso
 export const AI_TRAILER = new RegExp(`^(co-authored-by|assisted-by|generated-by|ai-assisted-by):.*\\b(${AI_TOOLS})`, "im");
 const AI_PROSE = new RegExp(`(generated|written|created|co-?authored) (with|by|using) \\[?(${AI_TOOLS})`, "i");
 const AI_BOT = new RegExp(`(${AI_TOOLS})`, "i");
+// The same disclosure outside the commit message, for projects that keep their
+// commits free of trailers: a PR label ("ai-assisted", "AI generated",
+// "copilot-generated"), or a field in the PR body a template asks for ("AI: Claude",
+// "AI-assisted: yes"). A label is a mark only with the disclosure in it: a bare
+// "ai" or "copilot" is as often a topic (game AI, a Copilot integration). A
+// field that says "no", or a template's unfilled "yes/no", discloses nothing.
+export const AI_LABEL = new RegExp(`^(ai|llm|genai|${AI_TOOLS})[-_ :/]*(assisted|generated|authored|written|made|contribution|pr)$|\\b(ai|llm)[-_ ]?(assisted|generated|authored|written)\\b`, "i");
+export const AI_FIELD = new RegExp(`^[\\s>*_#-]*(ai|llm|ai[- ](assisted|generated|used|tools?)|(assisted|generated)[- ]by)[*_]*\\s*:[*_\\s]*(yes\\b|true\\b|\\[x\\]|[^\\n/]*?\\b(${AI_TOOLS}))(?![\\w ]*\\/)`, "im");
+// How an AI-attributed PR says so in a form a tool can read, if it does
+export function aiMark({ messages = [], labels = [], body = "" }) {
+  if (messages.some((m) => AI_TRAILER.test(m))) return "trailer";
+  if (labels.some((l) => AI_LABEL.test(l))) return "label";
+  if (AI_FIELD.test(body)) return "field";
+  return null;
+}
+// What a policy asks AI work to carry, so a low score points at the project's
+// own convention: the trailers and labels it names. A name it rules out ("do not
+// add Co-Authored-By", "Assisted-by: instead of Co-Authored-By") is not asked for.
+const NOT_ASKED = /\b(do not|don't|never|must not|should not|avoid|no longer)\b/i;
+export function disclosureAsked(text) {
+  const asked = (text ?? "").split(/(?<=[.!?])\s+|\n/).filter((l) => !NOT_ASKED.test(l)).map((l) => l.replace(/\b(instead of|rather than|not)\b[^,;.]*/gi, "")).join("\n");
+  const trailers = [...new Set([...asked.matchAll(/\b(co-authored-by|assisted-by|generated-by|ai-assisted-by)\b/gi)].map((m) => m[1].toLowerCase()))];
+  const labels = [...new Set([...asked.matchAll(/[`"'“]([\w :/-]{2,30})[`"'”] label|\blabel\w*\b[^`"'“\n]{0,40}?[`"'“]([\w :/-]{2,30})[`"'”]/gi)].map((m) => m[1] ?? m[2]).filter((l) => AI_LABEL.test(l)))];
+  return { trailers, labels };
+}
 const isBot = (a) => !a || a.__typename === "Bot" || /\[bot\]$|-bot$|^bot-/i.test(a.login ?? "");
 
 // ---- data -------------------------------------------------------------------
@@ -99,6 +124,7 @@ const PR_QUERY = `query($q: String!, $after: String) {
       number title body mergedAt mergedBy { login }
       author { login __typename }
       reviews(states: APPROVED, first: 20) { nodes { author { login __typename } } }
+      labels(first: 20) { nodes { name } }
       changedFiles
       files(first: 100) { nodes { path additions deletions } }
       commits(first: 100) { nodes { commit { message } } }
@@ -181,7 +207,8 @@ async function policy(tree) {
   }
   // name the page that carries the ban, when it is a deeper one
   const banning = isBan(sources.map((x) => x.text).join("\n")) && sources.find((x) => isBan(x.text));
-  return banning ? { at: banning.at, ban: true } : { at: found.at, ban: false };
+  const text = sources.map((x) => x.text).join("\n");
+  return banning ? { at: banning.at, ban: true, text } : { at: found.at, ban: false, text };
 }
 
 // A ban: a sentence that names AI and refuses it, and none that welcomes it
@@ -319,6 +346,22 @@ export function verdictOf({ policy, aiSeen, bursts }) {
   return ["no AI visible, and no policy", null];
 }
 
+// The evidence for the mark check: how the marked PRs carry it, which PRs carry
+// none, and, when some do not, what the project's own policy asks for
+export function markEvidence(aiPRs, policyText) {
+  const marked = aiPRs.filter((p) => p.mark);
+  const by = ["trailer", "label", "field"].map((m) => [m, marked.filter((p) => p.mark === m).length]).filter(([, n]) => n);
+  let ev = `${marked.length}/${aiPRs.length} AI-attributed PRs`;
+  if (by.length) ev += ` (${by.map(([m, n]) => `${n} by ${m}`).join(", ")})`;
+  const bare = aiPRs.filter((p) => !p.mark);
+  if (!bare.length) return ev;
+  ev += `; without one: ${bare.slice(0, 5).map((p) => `#${p.number}`).join(", ")}${bare.length > 5 ? ` and ${bare.length - 5} more` : ""}`;
+  const { trailers, labels } = disclosureAsked(policyText);
+  const asked = [...trailers.map((t) => `${t.replace(/(^|-)\w/g, (c) => c.toUpperCase())}:`), ...labels.map((l) => `the "${l}" label`)];
+  if (asked.length) ev += `; the policy asks for ${asked.join(" or ")}`;
+  return `${ev} (a trailer naming the tool, a label like "ai-assisted" or an "AI:" field in the PR body counts)`;
+}
+
 // ---- scoring ----------------------------------------------------------------
 
 const pct = (n, d) => (d ? n / d : null);
@@ -346,8 +389,8 @@ async function score() {
 
   const prInfo = prs.map((p) => {
     const msgs = p.commits.nodes.map((c) => c.commit.message);
-    const trailer = msgs.some((s) => AI_TRAILER.test(s));
-    const ai = trailer || AI_PROSE.test(p.body ?? "") || (isBot(p.author) && AI_BOT.test(p.author?.login ?? ""));
+    const mark = aiMark({ messages: msgs, labels: (p.labels?.nodes ?? []).map((l) => l.name), body: p.body ?? "" });
+    const ai = Boolean(mark) || AI_PROSE.test(p.body ?? "") || (isBot(p.author) && AI_BOT.test(p.author?.login ?? ""));
     const author = p.author?.login;
     const reviewed = p.reviews.nodes.some((r) => r.author && r.author.login !== author && !isBot(r.author));
     // merged by a human other than its author: someone else decided it goes in
@@ -360,7 +403,7 @@ async function score() {
     // listing's 100 is too big to review whatever its lines
     const code = p.files.nodes.filter((f) => now?.handwritten(f.path) ?? CODE_EXT.test(f.path));
     const lines = p.changedFiles > 100 ? Infinity : code.reduce((s, f) => s + f.additions + f.deletions, 0);
-    return { number: p.number, ai, trailer, reviewed, mergedByOther, touchesSource, touchesTests, revert, touchesCode: code.length > 0, lines, at: Date.parse(p.mergedAt), who: author };
+    return { number: p.number, ai, mark, reviewed, mergedByOther, touchesSource, touchesTests, revert, touchesCode: code.length > 0, lines, at: Date.parse(p.mergedAt), who: author };
   });
   const aiPRs = prInfo.filter((p) => p.ai);
   const otherPRs = prInfo.filter((p) => !p.ai);
@@ -425,7 +468,7 @@ async function score() {
   const checks = [
     // pillar, name, weight, score 0..1 or null, evidence
     ["Transparency", "AI policy written down", 5, noAI ? null : policyScore, noAI ? "not needed: no AI visible" : policyEvidence],
-    ["Transparency", "AI work carries a machine-readable trailer", 5, rate(aiPRs, (p) => p.trailer), `${aiPRs.filter((p) => p.trailer).length}/${aiPRs.length} AI-attributed PRs`],
+    ["Transparency", "AI work carries a machine-readable mark", 5, rate(aiPRs, (p) => p.mark), markEvidence(aiPRs, policyAt?.text)],
     landed,
     ["Human control", "independent human review", 25, rate(prInfo, decided), `${prInfo.filter(decided).length}/${prInfo.length} merged PRs approved${noAI ? " or merged" : ""} by another human`],
     ["Human control", "changes small enough to review", 10, pct(small, changes.length), `${small}/${changes.length} changes under ${REVIEWABLE_LINES} changed lines${direct.length ? ` (${direct.length} of them direct pushes)` : ""}, median ${median === Infinity ? "100+ files" : median}`],
