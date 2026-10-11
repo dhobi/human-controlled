@@ -122,8 +122,8 @@ const isBot = (a) => !a || a.__typename === "Bot" || /\[bot\]$|-bot$|^bot-/i.tes
 
 // ---- data -------------------------------------------------------------------
 
-const PR_QUERY = `query($q: String!, $after: String) {
-  search(query: $q, type: ISSUE, first: 50, after: $after) {
+const PR_QUERY = `query($q: String!, $after: String, $first: Int!) {
+  search(query: $q, type: ISSUE, first: $first, after: $after) {
     pageInfo { hasNextPage endCursor }
     nodes { ... on PullRequest {
       number title body mergedAt mergedBy { login }
@@ -137,21 +137,28 @@ const PR_QUERY = `query($q: String!, $after: String) {
   }
 }`;
 
+// A page of 50 PRs with their files and commits is too much for GitHub on a
+// monorepo (pytorch, tensorflow, transformers answer 502 every time): halve the
+// page until it gets through
+const MIN_PAGE = 5;
 async function mergedPRs() {
   const out = [];
-  let after = null;
-  do {
-    const r = (await graphql(PR_QUERY, { q: `repo:${owner}/${repo} is:pr is:merged merged:>=${since.slice(0, 10)}`, after })).search;
+  let after = null, first = 50;
+  for (;;) {
+    const vars = { q: `repo:${owner}/${repo} is:pr is:merged merged:>=${since.slice(0, 10)}`, after, first };
+    let r;
+    try { r = (await graphql(PR_QUERY, vars, first > MIN_PAGE ? 2 : 4)).search; }
+    catch (e) { if (first <= MIN_PAGE || /rate limit/i.test(e.message)) throw e; first = Math.max(MIN_PAGE, first >> 1); continue; }
     out.push(...r.nodes.filter((n) => n.number));
     after = r.pageInfo.hasNextPage ? r.pageInfo.endCursor : null;
-  } while (after && out.length < MAX_PRS);
-  return out.slice(0, MAX_PRS);
+    if (!after || out.length >= MAX_PRS) return out.slice(0, MAX_PRS);
+  }
 }
 
-const HISTORY_QUERY = `query($owner: String!, $repo: String!, $since: GitTimestamp!, $after: String) {
+const HISTORY_QUERY = `query($owner: String!, $repo: String!, $since: GitTimestamp!, $after: String, $first: Int!) {
   repository(owner: $owner, name: $repo) {
     defaultBranchRef { name target { ... on Commit {
-      history(since: $since, first: 100, after: $after) {
+      history(since: $since, first: $first, after: $after) {
         pageInfo { hasNextPage endCursor }
         nodes { oid message committedDate additions deletions author { email user { login } } associatedPullRequests(first: 5) { nodes { number merged baseRefName } } statusCheckRollup { state } }
       }
@@ -161,15 +168,18 @@ const HISTORY_QUERY = `query($owner: String!, $repo: String!, $since: GitTimesta
 
 async function defaultBranch() {
   const commits = [];
-  let after = null, name = null;
-  do {
-    const ref = (await graphql(HISTORY_QUERY, { owner, repo, since, after })).repository.defaultBranchRef;
+  let after = null, name = null, first = 100;
+  for (;;) {
+    let ref;
+    try { ref = (await graphql(HISTORY_QUERY, { owner, repo, since, after, first }, first > MIN_PAGE ? 2 : 4)).repository.defaultBranchRef; }
+    catch (e) { if (first <= MIN_PAGE || /rate limit/i.test(e.message)) throw e; first = Math.max(MIN_PAGE, first >> 1); continue; }
     if (!ref) return { name: null, commits: [] }; // an empty repository
     name = ref.name;
     const h = ref.target.history;
     commits.push(...h.nodes);
     after = h.pageInfo.hasNextPage ? h.pageInfo.endCursor : null;
-  } while (after && commits.length < MAX_COMMITS);
+    if (!after || commits.length >= MAX_COMMITS) break;
+  }
   // a commit "landed through a PR" when a PR merged into this branch carries it
   for (const c of commits) c.viaPR = c.associatedPullRequests.nodes.find((p) => p.merged && p.baseRefName === name)?.number ?? null;
   return { name, commits: commits.slice(0, MAX_COMMITS) };
@@ -184,15 +194,24 @@ const isSource = (p) => !TEST_PATH.test(p) && !DOC_PATH.test(p) && !CONFIG_PATH.
 // to disclose it, or that it is not welcome. It may live in the repo or on a
 // page the README or CONTRIBUTING links to (followed two links deep).
 const AI_WORD = new RegExp(`\\bAI\\b|\\b(LLMs?|generative|(large )?language models?|machine-generated|${AI_TOOLS})\\b`, "i");
-const RULE_WORD = /\b(polic(y|ies)|guidelines?|rules?|disclos\w*|ban(ned|s)?|prohibit\w*|forbid\w*|(not )?(accept|allow|permit)\w*|must|reject\w*|usage|welcome\w*|encourag\w*)\b/i;
-export const isPolicyText = (text) => text.split(/(?<=[.!?])\s+|\n/).some((line) => AI_WORD.test(line.replace(/\bai\b/g, "")) && RULE_WORD.test(line));
+const RULE_WORD = /\b(polic(y|ies)|guidelines?|rules?|disclos\w*|ban(ned|s)?|prohibit\w*|forbid\w*|(not )?(accept|allow|permit)\w*|must|reject\w*|welcome\w*|encourag\w*)\b/i;
+// A "sentence" past 500 characters is a web page's menus and footers run
+// together, where "AI" and "Privacy Policy" meet by accident
+export const isPolicyText = (text) => text.split(/(?<=[.!?])\s+|\n/).some((line) => line.length <= 500 && AI_WORD.test(line.replace(/\bai\b/g, "")) && RULE_WORD.test(line));
+// A sentence that hands the AI story to the page it links: it says how the
+// project is made with AI, not what the product does with it ("Built with
+// Claude; how we work together is in [Collaboration]", not "Setup supports
+// Claude Code and [other agents]")
+const MAKING = /\b(built|made|make|developed|created|generated|assisted|co-?authored|written (with|by|using)|contribut\w*|collaborat\w*|together|disclos\w*|polic(y|ies)|guidelines?|how (we|i) (work|use))\b/i;
+export const handsOver = (sentence) => AI_WORD.test(sentence.replace(/\bai\b/g, "")) && MAKING.test(sentence);
 const POLICY_PATH = /(^|\/)(ai|llm|genai)[-_ ]?(policy|usage|guidelines?|contributions?|assist\w*)\.(md|rst|txt|adoc)$|(^|\/)ai\.md$/i;
 const POLICY_HOME = /^(\.github\/|docs\/)?(contributing|readme|code_of_conduct|governance)\.(md|rst|txt|adoc)$/i;
 
 async function fetchPage(url) {
   try {
     const r = await fetch(url, { headers: { "user-agent": "human-controlled" }, signal: AbortSignal.timeout(8000) });
-    if (!r.ok || !/text|html/.test(r.headers.get("content-type") ?? "")) return null;
+    // a page someone reads: HTML, plain text or markdown, not a stylesheet or script
+    if (!r.ok || !/text\/(html|plain|markdown)|application\/xhtml/.test(r.headers.get("content-type") ?? "")) return null;
     const html = await r.text();
     const links = [...html.matchAll(/href="([^"#]+)/g)].map((m) => { try { return new URL(m[1], r.url).href; } catch { return null; } }).filter(Boolean);
     return { url: r.url, text: html.replace(/<script[\s\S]*?<\/script>|<style[\s\S]*?<\/style>/g, " ").replace(/<[^>]+>/g, " ").replace(/&[a-z]+;/g, " "), links };
@@ -236,7 +255,7 @@ async function findPolicy(tree) {
   // ("Built with Claude; how we work together is in [Collaboration](docs/…)")
   for (const [home, t] of texts) {
     for (const line of t.split(/(?<=[.!?])\s+|\n\s*\n/)) {
-      if (!AI_WORD.test(line.replace(/\bai\b/g, ""))) continue;
+      if (!handsOver(line)) continue;
       for (const [, target] of line.matchAll(/\]\(([^)\s#]+)/g)) {
         if (/^https?:/.test(target)) { const pg = await fetchPage(target); if (pg) return { at: target, text: pg.text }; continue; }
         const path = new URL(target, `file:///${home}`).pathname.slice(1);
@@ -367,6 +386,27 @@ export function markEvidence(aiPRs, policyText) {
   return `${ev} (a trailer naming the tool, a label like "ai-assisted" or an "AI:" field in the PR body counts)`;
 }
 
+// A machine reviewer on a person's account, which GitHub does not mark as a
+// bot: a login that says review, bot or agent, approving at least half of all
+// merged PRs or on an account younger than three months. openrig's
+// "openrig-review", ten days old, approves every PR with a summary an AI wrote.
+const REVIEWER_NAME = /review|(^|[-_])bot([-_]|$)|agent|(^|[-_])(ai|llm|gpt)([-_]|$)|claude|copilot|codex|rabbit/i;
+const YOUNG_DAYS = 90;
+export function machineReviewers(prs, accounts = {}, now = Date.now()) {
+  const approvals = new Map();
+  for (const p of prs) for (const login of new Set(p.approvers)) approvals.set(login, (approvals.get(login) ?? 0) + 1);
+  const out = new Map();
+  for (const [login, n] of approvals) {
+    if (!REVIEWER_NAME.test(login)) continue;
+    const a = accounts[login] ?? {};
+    const share = n / prs.length;
+    const days = a.created ? (now - Date.parse(a.created)) / 864e5 : Infinity;
+    if (share < 0.5 && days >= YOUNG_DAYS) continue;
+    out.set(login, `${login}${a.name ? ` ("${a.name}")` : ""} approves ${fmt(share)} of merged PRs${days < YOUNG_DAYS ? `, account ${Math.floor(days)} days old` : ""}`);
+  }
+  return out;
+}
+
 // ---- scoring ----------------------------------------------------------------
 
 const pct = (n, d) => (d ? n / d : null);
@@ -392,14 +432,20 @@ async function score() {
 
   const [prs, now, ci, policyAt] = await pending;
 
+  // approvals by other people; a machine reviewer's are left out below
+  const approversOf = (p) => [...new Set(p.reviews.nodes.filter((r) => r.author && r.author.login !== p.author?.login && !isBot(r.author)).map((r) => r.author.login))];
+  const suspects = [...new Set(prs.flatMap(approversOf))].filter((l) => REVIEWER_NAME.test(l));
+  const accounts = Object.fromEntries(await mapLimit(suspects, 6, async (l) => { const u = await rest(`users/${l}`); return [l, { name: u?.name, created: u?.created_at }]; }));
+  const machines = machineReviewers(prs.map((p) => ({ approvers: approversOf(p) })), accounts);
+
   const prInfo = prs.map((p) => {
     const msgs = p.commits.nodes.map((c) => c.commit.message);
     const mark = aiMark({ messages: msgs, labels: (p.labels?.nodes ?? []).map((l) => l.name), body: p.body ?? "" });
     const ai = Boolean(mark) || AI_PROSE.test(p.body ?? "") || (isBot(p.author) && AI_BOT.test(p.author?.login ?? ""));
     const author = p.author?.login;
-    const reviewed = p.reviews.nodes.some((r) => r.author && r.author.login !== author && !isBot(r.author));
+    const reviewed = approversOf(p).some((l) => !machines.has(l));
     // merged by a human other than its author: someone else decided it goes in
-    const mergedByOther = Boolean(p.mergedBy && p.mergedBy.login !== author && !/\[bot\]$/.test(p.mergedBy.login));
+    const mergedByOther = Boolean(p.mergedBy && p.mergedBy.login !== author && !/\[bot\]$/.test(p.mergedBy.login) && !machines.has(p.mergedBy.login));
     const files = p.files.nodes.map((f) => f.path);
     const touchesSource = files.some(isSource);
     const touchesTests = files.some((f) => TEST_PATH.test(f));
@@ -475,7 +521,7 @@ async function score() {
     ["Transparency", "AI policy written down", 5, noAI ? null : policyScore, noAI ? "not needed: no AI visible" : policyEvidence],
     ["Transparency", "AI work carries a machine-readable mark", 5, rate(aiPRs, (p) => p.mark), markEvidence(aiPRs, policyAt?.text)],
     landed,
-    ["Human control", "independent human review", 25, rate(prInfo, decided), `${prInfo.filter(decided).length}/${prInfo.length} merged PRs approved${noAI ? " or merged" : ""} by another human`],
+    ["Human control", "independent human review", 25, rate(prInfo, decided), `${prInfo.filter(decided).length}/${prInfo.length} merged PRs approved${noAI ? " or merged" : ""} by another human${machines.size ? `; not counted, a machine reviewer: ${[...machines.values()].join("; ")}` : ""}`],
     ["Human control", "changes small enough to review", 10, pct(small, changes.length), `${small}/${changes.length} changes under ${REVIEWABLE_LINES} changed lines${direct.length ? ` (${direct.length} of them direct pushes)` : ""}, median ${median === Infinity ? "100+ files" : median}`],
     human(["Machine verification", "default branch green", 10, withChecks.length ? rate(withChecks, (c) => c.statusCheckRollup.state === "SUCCESS") : 0, withChecks.length ? `${withChecks.filter((c) => c.statusCheckRollup.state === "SUCCESS").length}/${withChecks.length} checked commits` : "no CI checks on the branch"]),
     human(["Machine verification", "source changes come with tests", 10, rate(sourcePRs, (p) => p.touchesTests), `${sourcePRs.filter((p) => p.touchesTests).length}/${sourcePRs.length} PRs touching source`]),

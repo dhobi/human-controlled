@@ -74,7 +74,7 @@ the full table.
 
 | Pillar | Check | Weight |
 |---|---|---|
-| Transparency | An AI policy is written down: how to use AI, how to disclose it, or that it is not welcome. In the repo, on a page a sentence about AI in the README or CONTRIBUTING links to, or on a policy page those link to | 5 |
+| Transparency | An AI policy is written down: how to use AI, how to disclose it, or that it is not welcome. In the repo, on a page linked from a README or CONTRIBUTING sentence about how the project is made with AI, or on a policy page those link to | 5 |
 | Transparency | AI-attributed work carries a machine-readable mark: a trailer (`Co-Authored-By:`, `Assisted-By:` …), a PR label (`ai-assisted`, `ai-generated` …) or an `AI:` field in the PR body | 5 |
 | Human control | Changes land through pull requests (with no AI visible, small commits pushed straight to the branch count too) | 10 |
 | Human control | Pull requests are approved by another human | 25 |
@@ -91,6 +91,11 @@ GitHub then lists the tool as a co-author; any of the other marks counts the
 same. A label has to say what it discloses: a bare `ai` or `copilot` label is
 as often a topic. When a PR carries no mark, the evidence lists it and names
 the trailer or label the project's own policy asks for.
+
+A review by an AI is not a review by another human, even from an account
+GitHub does not mark as a bot. A reviewer whose login says review, bot or
+agent, and that approves at least half of all merged PRs or has an account
+younger than three months, is treated as a machine; the evidence names it.
 
 The 400-line limit comes from code review research: past roughly 200–400
 changed lines, reviewers stop finding defects (SmartBear's study at Cisco).
