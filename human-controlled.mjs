@@ -49,14 +49,19 @@ async function rest(path) {
   } catch { return null; }
 }
 // GitHub answers a heavy query on a big repo with a 502 page now and then; a
-// retry usually gets through
+// retry usually gets through. Heavy queries also spend the secondary rate
+// limit's compute budget (flutter's history page takes ten seconds), and then
+// GitHub answers 403 until the minute is over: wait as long as it says.
 async function graphql(query, variables, tries = 4) {
   const r = await fetch("https://api.github.com/graphql", { method: "POST", headers: HEADERS, body: JSON.stringify({ query, variables }) });
   const j = await r.json().catch(() => null);
   if (!j?.data && tries > 1) {
-    await new Promise((ok) => setTimeout(ok, 2000));
+    const limited = r.status === 403 || r.status === 429 || /rate limit/i.test(j?.message ?? "");
+    const wait = limited ? 1000 * (Number(r.headers.get("retry-after")) || 60) : 2000;
+    await new Promise((ok) => setTimeout(ok, wait));
     return graphql(query, variables, tries - 1);
   }
+  if (!j?.data && j?.message) throw new Error(`GitHub GraphQL: ${j.message}`);
   if (!j) throw new Error(`GitHub GraphQL answered ${r.status}`);
   if (j.errors) throw new Error(j.errors.map((e) => e.message).join("; "));
   return j.data;
