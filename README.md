@@ -97,6 +97,13 @@ GitHub does not mark as a bot. A reviewer whose login says review, bot or
 agent, and that approves at least half of all merged PRs or has an account
 younger than three months, is treated as a machine; the evidence names it.
 
+Some projects review outside GitHub's pull requests and say so in the commit:
+a merge bot's `Approved by:` (pytorch), `Reviewed-by:`, Gerrit's
+`Reviewed-on:`, Phabricator's `Differential Revision:`, or Google's
+`PiperOrigin-RevId:` on changes reviewed inside Google (tensorflow). Such a
+commit counts as a reviewed change that landed through review, unless the
+approval names its own author.
+
 The 400-line limit comes from code review research: past roughly 200–400
 changed lines, reviewers stop finding defects (SmartBear's study at Cisco).
 

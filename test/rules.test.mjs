@@ -4,7 +4,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { badge } from "../badge.mjs";
-import { AI_TRAILER, AI_LABEL, AI_FIELD, aiMark, disclosureAsked, markEvidence, handsOver, machineReviewers, isPolicyText, isBan, attributeRules, mirrorReason, countBursts, verdictOf } from "../human-controlled.mjs";
+import { AI_TRAILER, AI_LABEL, AI_FIELD, aiMark, disclosureAsked, markEvidence, handsOver, machineReviewers, reviewedElsewhere, isPolicyText, isBan, attributeRules, mirrorReason, countBursts, verdictOf } from "../human-controlled.mjs";
 
 test("an AI trailer names an AI tool, a human co-author does not count", () => {
   assert.ok(AI_TRAILER.test("Fix it\n\nCo-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"));
@@ -142,6 +142,25 @@ test("a machine reviewer on a person's account says so in its name and approves 
   assert.equal(machineReviewers(some, { "code-reviewer-jo": { created: "2026-10-01T00:00:00Z" } }, now).size, 1);
   // "ai" inside a word is not the acronym
   assert.equal(machineReviewers(openrig.map(() => ({ approvers: ["kaito"] })), {}, now).size, 0);
+});
+
+test("a commit that names its review was reviewed, somewhere GitHub's PRs do not show", () => {
+  // pytorch: the merge bot closes the PR and lands the commit itself
+  assert.ok(reviewedElsewhere("Fix deque\n\nPull Request resolved: https://github.com/pytorch/pytorch/pull/200528\nApproved by: https://github.com/Skylion007", { user: { login: "alice" } }));
+  // tensorflow: imported from Google's internal review
+  assert.ok(reviewedElsewhere("Update XLA\n\nPiperOrigin-RevId: 812345678"));
+  assert.ok(reviewedElsewhere("mm: fix\n\nReviewed-by: Jane Doe <jane@example.org>", { email: "joe@example.org" }));
+  // approving your own commit is no review
+  assert.ok(!reviewedElsewhere("Fix\n\nApproved by: https://github.com/alice", { user: { login: "alice" } }));
+  assert.ok(!reviewedElsewhere("Fix\n\nReviewed-by: Joe <joe@example.org>", { email: "joe@example.org" }));
+  // the words in prose are no trailer
+  assert.ok(!reviewedElsewhere("Fix the bug that was approved by the team last week"));
+});
+
+test("commits that name their review are not a mirror's", () => {
+  const commits = Array.from({ length: 60 }, (_, i) => ({ author: { email: `dev${i % 8}@example.org` }, viaPR: null, elsewhere: true }));
+  assert.equal(mirrorReason("", commits), null);
+  assert.match(mirrorReason("", commits.map((c) => ({ ...c, elsewhere: false }))), /60 commits by 8 people/);
 });
 
 test("the verdict and its caps", () => {

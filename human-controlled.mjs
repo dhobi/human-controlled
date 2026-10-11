@@ -181,7 +181,10 @@ async function defaultBranch() {
     if (!after || commits.length >= MAX_COMMITS) break;
   }
   // a commit "landed through a PR" when a PR merged into this branch carries it
-  for (const c of commits) c.viaPR = c.associatedPullRequests.nodes.find((p) => p.merged && p.baseRefName === name)?.number ?? null;
+  for (const c of commits) {
+    c.viaPR = c.associatedPullRequests.nodes.find((p) => p.merged && p.baseRefName === name)?.number ?? null;
+    c.elsewhere = !c.viaPR && reviewedElsewhere(c.message, c.author);
+  }
   return { name, commits: commits.slice(0, MAX_COMMITS) };
 }
 
@@ -330,6 +333,23 @@ async function tree(ref) {
   return { paths: blobs.map((e) => e.path), handwritten: (path) => ours(path) && !generated.has(path) };
 }
 
+// Review that happened where GitHub's PR records do not show it, named in the
+// commit message: a merge bot's "Approved by:" (pytorch closes its PRs and
+// lands them itself), a kernel-style "Reviewed-by:", Gerrit's "Reviewed-on:",
+// Phabricator's "Differential Revision:", and Google's Copybara import
+// "PiperOrigin-RevId:" (tensorflow; a change inside Google is reviewed before
+// it is submitted). An approval that names the commit's own author is none.
+const REVIEW_TRAILER = /^(approved[- ]by|reviewed-by|reviewed-on|differential revision|piperorigin-revid):[ \t]*(\S.*)$/gim;
+export function reviewedElsewhere(message, author = {}) {
+  const self = [author?.user?.login, author?.email].filter(Boolean).map((x) => x.toLowerCase());
+  for (const [, kind, value] of (message ?? "").matchAll(REVIEW_TRAILER)) {
+    if (!/^(approved|reviewed-by)/i.test(kind)) return true;
+    const v = value.toLowerCase();
+    if (!self.some((x) => v.includes(x)) || !self.length) return true;
+  }
+  return false;
+}
+
 // ---- rules ------------------------------------------------------------------
 
 // A mirror: the repo says so, or many people commit and almost nothing lands
@@ -338,8 +358,8 @@ async function tree(ref) {
 export function mirrorReason(description, commits) {
   if (/\bmirror\b/i.test(description ?? "")) return `its description says "${description}"`;
   const people = new Set(commits.map((c) => c.author?.user?.login ?? c.author?.email)).size;
-  const viaPR = commits.length ? commits.filter((c) => c.viaPR).length / commits.length : 0;
-  return commits.length >= 50 && people >= 5 && viaPR < 0.1 ? `${commits.length} commits by ${people} people, ${fmt(viaPR)} of them through GitHub PRs` : null;
+  const viaPR = commits.length ? commits.filter((c) => c.viaPR || c.elsewhere).length / commits.length : 0;
+  return commits.length >= 50 && people >= 5 && viaPR < 0.1 ? `${commits.length} commits by ${people} people, ${fmt(viaPR)} of them through GitHub PRs or a review named in the commit` : null;
 }
 
 // AI-like bursts: three or more large unreviewed changes by one author within
@@ -443,7 +463,9 @@ async function score() {
     const mark = aiMark({ messages: msgs, labels: (p.labels?.nodes ?? []).map((l) => l.name), body: p.body ?? "" });
     const ai = Boolean(mark) || AI_PROSE.test(p.body ?? "") || (isBot(p.author) && AI_BOT.test(p.author?.login ?? ""));
     const author = p.author?.login;
-    const reviewed = approversOf(p).some((l) => !machines.has(l));
+    // approved on GitHub, or its commits name a review elsewhere (tensorflow's
+    // Copybara opens and merges a PR for each change Google reviewed inside)
+    const reviewed = approversOf(p).some((l) => !machines.has(l)) || msgs.some((m) => reviewedElsewhere(m, { user: { login: author } }));
     // merged by a human other than its author: someone else decided it goes in
     const mergedByOther = Boolean(p.mergedBy && p.mergedBy.login !== author && !/\[bot\]$/.test(p.mergedBy.login) && !machines.has(p.mergedBy.login));
     const files = p.files.nodes.map((f) => f.path);
@@ -489,9 +511,10 @@ async function score() {
   // to it. A direct push is counted whole (its files are not listed), so a
   // generated file in it counts too.
   const direct = commits.filter((c) => !c.viaPR);
+  const elsewhere = direct.filter((c) => c.elsewhere);
   const changes = [
     ...prInfo.filter((p) => p.touchesCode),
-    ...direct.map((c) => ({ lines: c.additions + c.deletions, reviewed: false, at: Date.parse(c.committedDate), who: c.author?.user?.login ?? c.author?.email, direct: true })),
+    ...direct.map((c) => ({ lines: c.additions + c.deletions, reviewed: c.elsewhere, at: Date.parse(c.committedDate), who: c.author?.user?.login ?? c.author?.email, direct: true })),
   ];
   const sizes = changes.map((c) => c.lines).sort((a, b) => a - b);
   const median = sizes.length ? sizes[Math.floor(sizes.length / 2)] : null;
@@ -508,20 +531,22 @@ async function score() {
   // question nobody needed to answer
   const noAI = !policyAt && aiSeen < AI_SEEN && bursts < MIN_BURSTS;
   const landed = noAI
-    ? ["Human control", "changes land through PRs, or as small commits", 10, rate(commits, (c) => c.viaPR || c.additions + c.deletions <= REVIEWABLE_LINES), `${commits.filter((c) => c.viaPR || c.additions + c.deletions <= REVIEWABLE_LINES).length}/${commits.length} commits on ${branch.name} came through a PR or were under ${REVIEWABLE_LINES} lines`]
-    : ["Human control", "changes land through PRs", 10, rate(commits, (c) => c.viaPR), `${commits.filter((c) => c.viaPR).length}/${commits.length} commits on ${branch.name}`];
+    ? ["Human control", "changes land through PRs, or as small commits", 10, rate(commits, (c) => c.viaPR || c.elsewhere || c.additions + c.deletions <= REVIEWABLE_LINES), `${commits.filter((c) => c.viaPR || c.elsewhere || c.additions + c.deletions <= REVIEWABLE_LINES).length}/${commits.length} commits on ${branch.name} came through a PR or a named review, or were under ${REVIEWABLE_LINES} lines`]
+    : ["Human control", "changes land through PRs", 10, rate(commits, (c) => c.viaPR || c.elsewhere), `${commits.filter((c) => c.viaPR || c.elsewhere).length}/${commits.length} commits on ${branch.name}${elsewhere.length ? ` (${elsewhere.length} with a review named in the commit)` : ""}`];
   // Machine checks are how a human controls code nobody on the team wrote: they
   // are the lever over AI output. Human-written code is controlled by its
   // author's understanding; tests make it better, not more controlled, so
   // without visible AI they are left out, like the revert rate.
   const human = (check) => (noAI ? [check[0], check[1], check[2], null, "not needed: no AI visible, the author's understanding is the control"] : check);
   const decided = (p) => p.reviewed || (noAI && p.mergedByOther);
+  // commits that name their review count as reviewed changes beside the PRs
+  const reviewUnits = [...prInfo, ...elsewhere.map(() => ({ reviewed: true }))];
   const checks = [
     // pillar, name, weight, score 0..1 or null, evidence
     ["Transparency", "AI policy written down", 5, noAI ? null : policyScore, noAI ? "not needed: no AI visible" : policyEvidence],
     ["Transparency", "AI work carries a machine-readable mark", 5, rate(aiPRs, (p) => p.mark), markEvidence(aiPRs, policyAt?.text)],
     landed,
-    ["Human control", "independent human review", 25, rate(prInfo, decided), `${prInfo.filter(decided).length}/${prInfo.length} merged PRs approved${noAI ? " or merged" : ""} by another human${machines.size ? `; not counted, a machine reviewer: ${[...machines.values()].join("; ")}` : ""}`],
+    ["Human control", "independent human review", 25, rate(reviewUnits, decided), `${prInfo.filter(decided).length}/${prInfo.length} merged PRs approved${noAI ? " or merged" : ""} by another human${elsewhere.length ? `, and ${elsewhere.length} commits that name their review (Approved by:, Reviewed-by:, PiperOrigin-RevId: …)` : ""}${machines.size ? `; not counted, a machine reviewer: ${[...machines.values()].join("; ")}` : ""}`],
     ["Human control", "changes small enough to review", 10, pct(small, changes.length), `${small}/${changes.length} changes under ${REVIEWABLE_LINES} changed lines${direct.length ? ` (${direct.length} of them direct pushes)` : ""}, median ${median === Infinity ? "100+ files" : median}`],
     human(["Machine verification", "default branch green", 10, withChecks.length ? rate(withChecks, (c) => c.statusCheckRollup.state === "SUCCESS") : 0, withChecks.length ? `${withChecks.filter((c) => c.statusCheckRollup.state === "SUCCESS").length}/${withChecks.length} checked commits` : "no CI checks on the branch"]),
     human(["Machine verification", "source changes come with tests", 10, rate(sourcePRs, (p) => p.touchesTests), `${sourcePRs.filter((p) => p.touchesTests).length}/${sourcePRs.length} PRs touching source`]),
